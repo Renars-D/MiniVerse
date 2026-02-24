@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MiniVerse</title>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-auth.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<style>
+body{
+margin:0;
+font-family:Arial;
+background:#1b1b1b;
+color:white;
+overflow:hidden;
+}
+
+.screen{display:none}
+
+button{
+background:#2e2e2e;
+color:white;
+border:none;
+padding:8px 12px;
+cursor:pointer;
+border-radius:6px;
+}
+
+button:hover{background:#3a3a3a}
+
+#menuTop{
+display:flex;
+justify-content:space-between;
+align-items:center;
+padding:20px 40px;
+}
+
+#menuGrid{
+display:flex;
+gap:20px;
+padding:40px;
+}
+
+.gameCard{
+background:#2a2a2a;
+width:220px;
+height:140px;
+border-radius:10px;
+display:flex;
+align-items:center;
+justify-content:center;
+cursor:pointer;
+transition:0.2s;
+}
+
+.gameCard:hover{
+background:#3c3c3c;
+transform:scale(1.05);
+}
+
+canvas{display:block}
+
+#chatBox{
+position:absolute;
+bottom:0;
+left:0;
+width:300px;
+height:250px;
+background:rgba(0,0,0,0.75);
+display:flex;
+flex-direction:column;
+}
+
+#messages{
+flex:1;
+overflow:auto;
+padding:5px;
+font-size:14px;
+}
+</style>
+</head>
+
+<body>
+
+<!-- LOGIN -->
+<div id="login" class="screen" style="display:block;text-align:center;margin-top:120px;">
+<h2>MiniVerse</h2>
+<input id="user" placeholder="Username"><br>
+<input id="pass" type="password" placeholder="Password"><br>
+<button onclick="signup()">Sign Up</button>
+<button onclick="login()">Login</button>
+<p id="err" style="color:red"></p>
+</div>
+
+<!-- MENU -->
+<div id="menu" class="screen">
+<div id="menuTop">
+<h2>MiniVerse</h2>
+<button onclick="logout()">Sign Out</button>
+</div>
+
+<div id="menuGrid">
+<div class="gameCard" onclick="openGame('sandbox')">Sandbox</div>
+<div class="gameCard" onclick="openGame('military')">Military</div>
+<div class="gameCard" onclick="openGame('dungeon')">Dungeon</div>
+</div>
+</div>
+
+<!-- GAME -->
+<div id="game" class="screen">
+<button onclick="exitGame()" style="position:absolute;top:10px;right:10px;">Back</button>
+<div id="chatBox">
+<div id="messages"></div>
+<input id="chatInput" placeholder="Chat...">
+</div>
+<canvas id="canvas"></canvas>
+</div>
+
+<script>
+// ================= FIREBASE =================
+const firebaseConfig = {
+  apiKey: "AIzaSyCwBRue2zavMdVKdOhdVYdG66aWvjC-PC4",
+  authDomain: "miniverse-d1dc8.firebaseapp.com",
+  databaseURL: "https://miniverse-d1dc8-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "miniverse-d1dc8",
+  storageBucket: "miniverse-d1dc8.firebasestorage.app",
+  messagingSenderId: "233990615052",
+  appId: "1:233990615052:web:6da79cc10b0b217495fe29",
+  measurementId: "G-PHRLJGJFKS"
+};
+
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.database();
+
+// ================= UI FIX =================
+const loginScreen = document.getElementById("login");
+const menuScreen = document.getElementById("menu");
+const gameScreen = document.getElementById("game");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const messages = document.getElementById("messages");
+const chatInput = document.getElementById("chatInput");
+const onlineCount = document.getElementById("onlineCount");
+
+// ================= GLOBALS =================
+let currentGame = "";
+let playersRef = null;
+let chatRef = null;
+
+let animationId = null;
+let keys = {};
+let bullets = [];
+let zombies = {};
+let players = {};
+
+// ================= INPUT =================
+document.addEventListener("keydown", e => keys[e.key.toLowerCase()] = true);
+document.addEventListener("keyup", e => keys[e.key.toLowerCase()] = false);
+
+// ================= AUTH =================
+function signup(){
+  auth.createUserWithEmailAndPassword(user.value+"@mini.com",pass.value)
+  .catch(e=>err.innerText=e.message);
+}
+
+function login(){
+  auth.signInWithEmailAndPassword(user.value+"@mini.com",pass.value)
+  .catch(e=>err.innerText=e.message);
+}
+
+function logout(){
+  auth.signOut();
+}
+
+auth.onAuthStateChanged(u=>{
+  if(u){
+    loginScreen.style.display="none";
+    menuScreen.style.display="block";
+  } else {
+  loginScreen.style.display = "block";
+  menuScreen.style.display = "none";
+  gameScreen.style.display = "none";
+  }
+});
+
+// ================= GAME SWITCH =================
+function openGame(name){
+  currentGame = name;
+  menu.style.display="none";
+  game.style.display="block";
+  startGame();
+}
+
+function exitGame(){
+  if(animationId) cancelAnimationFrame(animationId);
+
+  if(playersRef){
+    playersRef.child(auth.currentUser.uid).remove();
+    playersRef.off();
+  }
+
+  if(chatRef) chatRef.off();
+
+  bullets = [];
+  zombies = {};
+  players = {};
+
+  game.style.display="none";
+  menu.style.display="block";
+}
+
+// ================= START GAME =================
+function startGame(){
+
+  if(animationId) cancelAnimationFrame(animationId);
+
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+
+  const uid = auth.currentUser.uid;
+  const username = auth.currentUser.email.split("@")[0];
+
+  // ================= DUNGEON (SINGLEPLAYER) =================
+  if(currentGame === "dungeon"){
+
+    const cols = 40;
+    const rows = 25;
+    const tile = 40;
+
+    let map = [];
+    for(let y=0;y<rows;y++){
+      map[y]=[];
+      for(let x=0;x<cols;x++){
+        map[y][x] = Math.random() < 0.35 ? 1 : 0;
+      }
+    }
+
+    let player = {x:200,y:200};
+
+    function loop(){
+      if(keys["w"]) player.y -= 3;
+      if(keys["s"]) player.y += 3;
+      if(keys["a"]) player.x -= 3;
+      if(keys["d"]) player.x += 3;
+
+      ctx.fillStyle="black";
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      for(let y=0;y<rows;y++){
+        for(let x=0;x<cols;x++){
+          if(map[y][x]===1){
+            ctx.fillStyle="#333";
+            ctx.fillRect(x*tile,y*tile,tile,tile);
+          }
+        }
+      }
+
+      // Torch light
+      ctx.save();
+      ctx.globalCompositeOperation="destination-out";
+      ctx.beginPath();
+      ctx.arc(player.x+15,player.y+15,120,0,Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+    return;
+  }
+
+  // ================= MULTIPLAYER =================
+  playersRef = db.ref("games/"+currentGame+"/players");
+  chatRef = db.ref("games/"+currentGame+"/chat");
+
+  bullets = [];
+  zombies = {};
+
+  playersRef.child(uid).set({
+    x:200,
+    y:200,
+    username,
+    health:100
+  });
+
+  playersRef.child(uid).onDisconnect().remove();
+
+  playersRef.on("value", snap=>{
+    players = snap.val() || {};
+    onlineCount.innerText = "Online: "+Object.keys(players).length;
+  });
+
+  // ================= CHAT FIX =================
+  messages.innerHTML="";
+  chatRef.limitToLast(50).off();
+  chatRef.limitToLast(50).on("child_added", snap=>{
+    const m = snap.val();
+    const div = document.createElement("div");
+    div.innerHTML = "<b>"+m.username+":</b> "+m.text;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+  });
+
+  chatInput.onkeydown = e=>{
+    if(e.key==="Enter" && chatInput.value.trim()!==""){
+      chatRef.push({
+        username,
+        text:chatInput.value.trim()
+      });
+      chatInput.value="";
+    }
+  };
+
+  // ================= MILITARY ZOMBIES =================
+  if(currentGame==="military"){
+    for(let i=0;i<6;i++){
+      zombies[i] = {
+        x:Math.random()*canvas.width,
+        y:Math.random()*canvas.height
+      };
+    }
+  }
+
+  let lastShot = 0;
+
+  canvas.onclick = e=>{
+    if(currentGame!=="military") return;
+    if(Date.now()-lastShot<200) return; // 0.2s cooldown
+    lastShot = Date.now();
+
+    let p = players[uid];
+    if(!p) return;
+
+    let angle = Math.atan2(e.clientY-p.y,e.clientX-p.x);
+
+    bullets.push({
+      x:p.x+15,
+      y:p.y+15,
+      vx:Math.cos(angle)*8,
+      vy:Math.sin(angle)*8
+    });
+  };
+
+  // ================= MAIN LOOP =================
+  function loop(){
+
+    ctx.fillStyle=currentGame==="sandbox"?"#4aa3ff":"#1f1f1f";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    let p = players[uid];
+
+    if(p){
+      if(keys["w"]) p.y-=3;
+      if(keys["s"]) p.y+=3;
+      if(keys["a"]) p.x-=3;
+      if(keys["d"]) p.x+=3;
+
+      playersRef.child(uid).update({x:p.x,y:p.y});
+    }
+
+    // Bullets
+    bullets.forEach((b,bi)=>{
+      b.x+=b.vx;
+      b.y+=b.vy;
+
+      for(let zi in zombies){
+        let z = zombies[zi];
+        if(Math.hypot(b.x-z.x,b.y-z.y)<20){
+          delete zombies[zi];
+          bullets.splice(bi,1);
+          break;
+        }
+      }
+
+      ctx.fillStyle="yellow";
+      ctx.fillRect(b.x,b.y,5,5);
+    });
+
+    // Zombies
+    for(let zi in zombies){
+      let z = zombies[zi];
+      if(!p) continue;
+
+      let dx=p.x-z.x;
+      let dy=p.y-z.y;
+      let dist=Math.hypot(dx,dy);
+
+      if(dist>0){
+        z.x+=dx/dist;
+        z.y+=dy/dist;
+      }
+
+      ctx.fillStyle="green";
+      ctx.fillRect(z.x,z.y,30,30);
+    }
+
+    // Players
+    for(let id in players){
+      let pl = players[id];
+      ctx.fillStyle="white";
+      ctx.fillText(pl.username,pl.x,pl.y-10);
+      ctx.fillRect(pl.x,pl.y,30,30);
+    }
+
+    animationId=requestAnimationFrame(loop);
+  }
+
+  loop();
+}
+</script>
+
+</body>
+</html>
